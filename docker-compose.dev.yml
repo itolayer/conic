@@ -1,0 +1,26 @@
+services:
+  conic-ckb-node:
+    build:
+      context: .
+      dockerfile: Dockerfile.devnet
+    container_name: conic-ckb-node
+    init: true
+    environment:
+      - OFFCKB_CKB_VERSION=0.205.0
+    volumes:
+      - offckb-home:/offckb-home
+    ports:
+      # Proxy RPC (used by ccc in smoke test)
+      - "28114:28114"
+
+  nostr-relay:
+    image: scsibug/nostr-rs-relay:0.8.8
+    container_name: conic-nostr-relay
+    ports:
+      - "8080:8080"
+    volumes:
+      - nostr-data:/usr/src/app/db
+
+volumes:
+  offckb-home:
+  nostr-data:

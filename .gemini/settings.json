@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/schemas/settings.schema.json",
+  "mcpServers": {
+    "shadcn": {
+      "command": "npx",
+      "args": ["shadcn@latest", "mcp"]
+    },
+    "httpServer": {
+        "httpUrl": "https://mcp.ckbdev.com/ckbai"
+    }
+  },
+  "context": {
+    "fileName": ["AGENTS.md"]
+  }
+}

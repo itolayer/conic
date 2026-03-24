@@ -1,0 +1,89 @@
+:root {
+  --bg: #f1eadf;
+  --bg-deep: #d8c7b3;
+  --text: #445766;
+  --text-strong: #17242d;
+  --text-muted: #657785;
+  --border-strong: rgba(23, 36, 45, 0.1);
+  --panel-shadow: 0 22px 50px rgba(83, 69, 51, 0.12), 0 12px 24px rgba(18, 34, 44, 0.08);
+  --sans: 'Space Grotesk', 'IBM Plex Sans', 'Avenir Next', 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', 'SFMono-Regular', 'Consolas', monospace;
+
+  font-family: var(--sans);
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(225, 93, 48, 0.14), transparent 26%),
+    radial-gradient(circle at top right, rgba(21, 88, 117, 0.14), transparent 22%),
+    linear-gradient(180deg, var(--bg), var(--bg-deep));
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: var(--text);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  color: var(--text-strong);
+  letter-spacing: -0.03em;
+}
+
+h1 {
+  font-size: clamp(2.6rem, 4.5vw, 4.8rem);
+  line-height: 0.98;
+}
+
+h2 {
+  font-size: clamp(1.25rem, 2vw, 1.7rem);
+}
+
+p,
+li,
+input,
+select,
+button {
+  font-size: 1rem;
+}
+
+code {
+  font-family: var(--mono);
+}

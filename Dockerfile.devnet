@@ -1,0 +1,19 @@
+FROM node:20-bookworm
+
+# Install OffCKB CLI (used to download and run a CKB devnet)
+RUN npm install -g @offckb/cli
+
+# OffCKB home directory (mounted as a Docker volume in compose for caching)
+ENV OFFCKB_CKB_VERSION=0.205.0
+ENV HOME=/offckb-home
+RUN mkdir -p /offckb-home/.config/offckb-nodejs && \
+    echo '{"bins": {"defaultCKBVersion": "0.205.0"}}' > /offckb-home/.config/offckb-nodejs/settings.json
+
+COPY docker/devnet-entrypoint.sh /usr/local/bin/conic-devnet-entrypoint
+RUN chmod +x /usr/local/bin/conic-devnet-entrypoint
+
+EXPOSE 28114
+STOPSIGNAL SIGTERM
+
+ENTRYPOINT ["/usr/local/bin/conic-devnet-entrypoint"]
+CMD []

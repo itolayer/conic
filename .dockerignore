@@ -1,0 +1,10 @@
+node_modules
+.git
+.github
+dist
+build
+.vscode
+.cursor
+.DS_Store
+tmp
+

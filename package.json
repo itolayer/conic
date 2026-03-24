@@ -1,0 +1,74 @@
+{
+  "name": "conic",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "prepare": "husky",
+    "typecheck": "tsc -b --noEmit",
+    "test:unit:raw": "vitest run",
+    "test:coinjoin:raw": "tsx src/integration-tests/coinjoin-flow.ts",
+    "test:unit": "./scripts/devnet-run.sh pnpm run test:unit:raw",
+    "test:coinjoin": "./scripts/devnet-run.sh pnpm run test:coinjoin:raw",
+    "devnet:build": "docker compose -f docker-compose.dev.yml build conic-ckb-node",
+    "devnet:up": "docker compose -f docker-compose.dev.yml up -d conic-ckb-node nostr-relay",
+    "devnet:stop": "docker compose -f docker-compose.dev.yml stop conic-ckb-node nostr-relay",
+    "devnet:start": "docker compose -f docker-compose.dev.yml start conic-ckb-node nostr-relay",
+    "devnet:restart": "docker compose -f docker-compose.dev.yml restart conic-ckb-node nostr-relay",
+    "devnet:recreate": "docker compose -f docker-compose.dev.yml up -d --force-recreate conic-ckb-node nostr-relay",
+    "relay:clean-events": "./scripts/clean-relay-events.sh",
+    "preflight": "pnpm run typecheck && pnpm run lint && pnpm run test:unit"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^1.12.5",
+    "@cloudflare/blindrsa-ts": "^0.4.5",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@radix-ui/react-toast": "^1.2.15",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.577.0",
+    "nostr-tools": "^2.23.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwind-merge": "^3.5.0",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@ckb-ccc/ccc": "^1.1.25",
+    "@eslint/js": "^9.39.4",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^24.12.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.4.0",
+    "husky": "^9.1.7",
+    "jsdom": "^29.0.1",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.56.1",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,css,md}": [
+      "prettier --write"
+    ]
+  }
+}
