@@ -63,6 +63,26 @@ describe('NostrService', () => {
   )
 
   it(
+    'ignores delete events from other identities when listing intents',
+    async ({ skip }) => {
+      await withConnectedServices(async (service1, service2) => {
+        const intentId = await service1.publishIntent({
+          amount: 100_000_000_000n,
+          minParticipants: 3,
+        })
+
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        await service2.deleteEvent(intentId)
+        await new Promise((resolve) => setTimeout(resolve, 500))
+
+        const intents = await service2.listIntents()
+        expect(intents.find((intent) => intent.id === intentId)).toBeDefined()
+      }, skip)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
     'should publish round commitment (Kind 30078)',
     async ({ skip }) => {
       await withConnectedServices(async (service1, service2) => {

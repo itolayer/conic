@@ -305,6 +305,8 @@
 .metric-card,
 .readonly-field,
 .intent-item,
+.policy-panel,
+.policy-review,
 .tx-list-panel,
 .tx-row {
   border-radius: 16px;
@@ -328,6 +330,103 @@
 .modal-header p,
 .console-dock-header p {
   color: var(--text-muted);
+}
+
+.autopilot-banner {
+  margin-top: 18px;
+}
+
+.autopilot-meta {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.policy-panel,
+.policy-review,
+.manual-fallback {
+  margin-top: 18px;
+}
+
+.policy-panel,
+.policy-review {
+  padding: 16px;
+}
+
+.policy-panel-header,
+.policy-review-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.policy-panel-note,
+.policy-example,
+.policy-review-header p,
+.policy-explanation,
+.manual-fallback-copy {
+  margin-top: 8px;
+  color: var(--text-muted);
+}
+
+.policy-prompt {
+  min-height: 124px;
+  padding: 14px;
+  resize: vertical;
+  font: inherit;
+}
+
+.policy-review-unsupported {
+  background: rgba(255, 247, 239, 0.92);
+}
+
+.policy-review h3 {
+  margin: 0;
+}
+
+.policy-warning-list {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  color: var(--text-muted);
+  display: grid;
+  gap: 6px;
+}
+
+.field-policy-address {
+  margin-top: 18px;
+}
+
+.manual-fallback {
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid rgba(23, 36, 45, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.manual-fallback summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 16px;
+  font-weight: 700;
+}
+
+.manual-fallback summary::-webkit-details-marker {
+  display: none;
+}
+
+.manual-fallback[open] {
+  padding-bottom: 16px;
+}
+
+.manual-fallback[open] summary {
+  border-bottom: 1px solid rgba(23, 36, 45, 0.08);
+  margin-bottom: 16px;
+}
+
+.manual-fallback-copy,
+.manual-fallback .field-grid,
+.manual-fallback .button-row {
+  padding: 0 16px;
 }
 
 .readonly-field {
@@ -720,7 +819,9 @@
   .topbar-shell,
   .console-dock-header,
   .modal-header,
-  .wallet-line-row {
+  .wallet-line-row,
+  .policy-panel-header,
+  .policy-review-header {
     flex-direction: column;
   }
 

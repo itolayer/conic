@@ -83,6 +83,10 @@ function App() {
     [state.intents],
   )
   const activityTranscript = useMemo(() => formatActivityLog(state.eventLog), [state.eventLog])
+  const supportedPolicy = state.policyInterpretation?.supported
+    ? state.policyInterpretation.policy
+    : undefined
+  const policyWarnings = state.policyInterpretation?.warnings ?? []
   const sessionReady =
     state.connection.status === 'connected' && Boolean(state.ckbAddress) && Boolean(state.balance)
   const roundTerminal =
@@ -91,12 +95,6 @@ function App() {
     state.round.coordinatorPhase === 'FAILED' ||
     state.round.coordinatorPhase === 'COMPLETE'
   const publishLocked = Boolean(state.activeIntentId) && !roundTerminal
-  const publishDisabled =
-    state.connection.status !== 'connected' ||
-    !sessionReady ||
-    state.isPublishingIntent ||
-    state.selectedIntentType !== 'coinjoin' ||
-    publishLocked
   const showRoundMonitor = Boolean(
     state.activeIntentId ||
     state.round.coordinationId ||
@@ -104,11 +102,26 @@ function App() {
     state.round.failureReason ||
     state.round.completedTxSummary,
   )
-  const showPublishCard = !state.activeIntentId
   const walletLabel =
     state.connection.status === 'connected'
       ? formatIdentifier(state.ckbAddress ?? 'Connected', 6, 6)
       : 'Connect'
+  const policyPending = state.policyStatus === 'interpreting'
+  const receiverReady = state.receiverAddress.trim().length > 0
+  const canArmAutopilot =
+    Boolean(supportedPolicy) &&
+    receiverReady &&
+    sessionReady &&
+    state.connection.status === 'connected' &&
+    !state.autopilotStatus.armed
+  const manualPublishDisabled =
+    state.connection.status !== 'connected' ||
+    !sessionReady ||
+    !receiverReady ||
+    state.isPublishingIntent ||
+    state.selectedIntentType !== 'coinjoin' ||
+    publishLocked ||
+    state.autopilotStatus.armed
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
@@ -157,6 +170,7 @@ function App() {
     sessionReady,
     selectedIntentType: state.selectedIntentType,
     publishLocked,
+    autopilotArmed: state.autopilotStatus.armed,
   })
 
   const handleWalletButtonClick = () => {
@@ -335,52 +349,192 @@ function App() {
             </CardContent>
           </Card>
 
-          {showPublishCard ? (
-            <Card className="panel panel-intent">
-              <CardHeader>
-                <CardTitle>Publish Intent</CardTitle>
-                <CardDescription>
-                  Create one active CoinJoin intent at a time. Other intent categories are visible
-                  here to establish CONIC as a broader decentralized intention layer.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="intent-type-grid" role="list" aria-label="Intent types">
-                  {INTENT_OPTIONS.map((option) => {
-                    const Icon = option.icon
-                    const selected = state.selectedIntentType === option.id
+          <Card className="panel panel-intent">
+            <CardHeader>
+              <CardTitle>Privacy Agent</CardTitle>
+              <CardDescription>
+                Describe a CoinJoin privacy goal in plain language, let the policy layer translate
+                it into a deterministic plan, then arm autopilot to publish and coordinate the round
+                in the background.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="intent-type-grid" role="list" aria-label="Intent types">
+                {INTENT_OPTIONS.map((option) => {
+                  const Icon = option.icon
+                  const selected = state.selectedIntentType === option.id
 
-                    return (
-                      <button
-                        key={option.id}
-                        type="button"
-                        className={`intent-type-card${selected ? ' intent-type-card-selected' : ''}`}
-                        disabled={!option.enabled}
-                        aria-pressed={selected}
-                        onClick={() => state.setSelectedIntentType(option.id)}
-                      >
-                        <Icon size={18} />
-                        <strong>{option.label}</strong>
-                        <span>{option.description}</span>
-                      </button>
-                    )
-                  })}
-                </div>
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`intent-type-card${selected ? ' intent-type-card-selected' : ''}`}
+                      disabled={!option.enabled}
+                      aria-pressed={selected}
+                      onClick={() => state.setSelectedIntentType(option.id)}
+                    >
+                      <Icon size={18} />
+                      <strong>{option.label}</strong>
+                      <span>{option.description}</span>
+                    </button>
+                  )
+                })}
+              </div>
 
-                <div className="intent-lock-banner">
-                  <Badge
-                    variant={
-                      publishLocked ? 'warning' : state.activeIntentId ? 'success' : 'neutral'
-                    }
-                  >
-                    {publishLocked
-                      ? 'One active intent in progress'
-                      : state.activeIntentId
-                        ? 'Intent finished'
-                        : 'Ready to publish'}
+              <div className="policy-panel">
+                <div className="policy-panel-header">
+                  <div>
+                    <Badge variant="accent">CoinJoin Agent</Badge>
+                    <p className="policy-panel-note">
+                      AI interprets your privacy goal. Transaction assembly and signing stay
+                      deterministic.
+                    </p>
+                  </div>
+                  <Badge variant={statusBadgeVariant(state.policyStatus)}>
+                    {state.policyStatus === 'idle' ? 'Ready' : toTitleCase(state.policyStatus)}
                   </Badge>
-                  <p>{publishHint}</p>
                 </div>
+
+                <label className="field">
+                  <span>Describe Privacy Goal</span>
+                  <textarea
+                    className="ui-input policy-prompt"
+                    placeholder="Mix 1,000 CKB with at least 3 peers for privacy."
+                    value={state.policyPrompt}
+                    onChange={(event) => state.updatePolicyPrompt(event.target.value)}
+                  />
+                </label>
+
+                <div className="button-row">
+                  <Button
+                    disabled={policyPending || state.policyPrompt.trim().length === 0}
+                    onClick={() => handleAction(state.interpretPolicy)}
+                  >
+                    <Sparkles size={16} />
+                    {policyPending ? 'Interpreting…' : 'Interpret Policy'}
+                  </Button>
+                </div>
+
+                <p className="policy-example">
+                  Example: <code>Mix 1000 CKB with 3 peers for privacy.</code>
+                </p>
+              </div>
+
+              <div className="intent-lock-banner autopilot-banner">
+                <Badge variant={state.autopilotStatus.armed ? 'success' : 'neutral'}>
+                  {state.autopilotStatus.armed ? 'Autopilot armed' : 'Autopilot idle'}
+                </Badge>
+                <p>{state.autopilotStatus.lastAction}</p>
+                {state.autopilotStatus.retryAt ? (
+                  <span className="autopilot-meta">
+                    Retry at {formatClockTime(state.autopilotStatus.retryAt)}
+                  </span>
+                ) : null}
+              </div>
+
+              {state.policyInterpretation ? (
+                <div
+                  className={`policy-review${
+                    state.policyInterpretation.supported ? '' : ' policy-review-unsupported'
+                  }`}
+                >
+                  <div className="policy-review-header">
+                    <div>
+                      <h3>Policy Review</h3>
+                      <p>{state.policyInterpretation.summary}</p>
+                    </div>
+                    <Badge variant={state.policyInterpretation.supported ? 'success' : 'warning'}>
+                      {state.policyInterpretation.supported ? 'Supported' : 'Unsupported'}
+                    </Badge>
+                  </div>
+
+                  <p className="policy-explanation">{state.policyInterpretation.explanation}</p>
+
+                  {policyWarnings.length > 0 ? (
+                    <ul className="policy-warning-list">
+                      {policyWarnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+
+                  {supportedPolicy ? (
+                    <>
+                      <div className="summary-strip summary-strip-compact">
+                        <Metric
+                          label="Mix Amount"
+                          value={formatShannonsAsCkb(supportedPolicy.mixAmountShannons)}
+                        />
+                        <Metric
+                          label="Min Participants"
+                          value={String(supportedPolicy.minParticipants)}
+                        />
+                      </div>
+
+                      <label className="field field-policy-address">
+                        <span>Receiver Address</span>
+                        <Input
+                          placeholder="ckt1..."
+                          value={state.receiverAddress}
+                          onChange={(event) =>
+                            state.updateReceiverAddress(event.target.value.trim())
+                          }
+                        />
+                      </label>
+
+                      <div className="button-row">
+                        {state.autopilotStatus.armed ? (
+                          <Button
+                            variant="danger"
+                            onClick={() =>
+                              handleAction(state.disarmAutopilot, {
+                                tone: 'info',
+                                title: 'Autopilot disarmed',
+                                description:
+                                  'Autopilot stopped watching the relay and withdrew the active intent.',
+                              })
+                            }
+                          >
+                            Disarm Autopilot
+                          </Button>
+                        ) : (
+                          <Button
+                            disabled={!canArmAutopilot}
+                            onClick={() =>
+                              handleAction(state.armAutopilot, {
+                                tone: 'success',
+                                title: 'Autopilot armed',
+                                description:
+                                  'Autopilot will publish the parsed CoinJoin policy and keep retrying until one round completes.',
+                              })
+                            }
+                          >
+                            Arm Autopilot
+                          </Button>
+                        )}
+                        <Button
+                          variant="secondary"
+                          disabled={manualPublishDisabled || !receiverReady || !supportedPolicy}
+                          onClick={() =>
+                            handleAction(state.publishIntent, {
+                              tone: 'success',
+                              title: 'Intent published',
+                              description:
+                                'The parsed CoinJoin policy was published once without arming autopilot.',
+                            })
+                          }
+                        >
+                          Publish Once
+                        </Button>
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <details className="manual-fallback">
+                <summary>Manual fallback</summary>
+                <p className="manual-fallback-copy">{publishHint}</p>
 
                 <div className="field-grid">
                   <label className="field">
@@ -421,19 +575,21 @@ function App() {
                       </button>
                     </div>
                   </label>
-                  <label className="field field-span-2">
-                    <span>Receiver Address</span>
-                    <Input
-                      placeholder="ckt1..."
-                      value={state.receiverAddress}
-                      onChange={(event) => state.updateReceiverAddress(event.target.value.trim())}
-                    />
-                  </label>
+                  {!state.policyInterpretation ? (
+                    <label className="field field-span-2">
+                      <span>Receiver Address</span>
+                      <Input
+                        placeholder="ckt1..."
+                        value={state.receiverAddress}
+                        onChange={(event) => state.updateReceiverAddress(event.target.value.trim())}
+                      />
+                    </label>
+                  ) : null}
                 </div>
 
                 <div className="button-row">
                   <Button
-                    disabled={publishDisabled}
+                    disabled={manualPublishDisabled}
                     onClick={() =>
                       handleAction(state.publishIntent, {
                         tone: 'success',
@@ -460,9 +616,9 @@ function App() {
                     Refresh Recent
                   </Button>
                 </div>
-              </CardContent>
-            </Card>
-          ) : null}
+              </details>
+            </CardContent>
+          </Card>
 
           {showRoundMonitor ? (
             <Card className="panel panel-round">
@@ -916,6 +1072,15 @@ function humanizeError(error: unknown): string {
   if (message.includes('CKB RPC')) {
     return 'Connect the CKB RPC before preparing the session.'
   }
+  if (message.includes('Policy AI is not configured')) {
+    return 'Set the policy AI env vars before using the natural-language policy layer.'
+  }
+  if (message.includes('Interpret a supported privacy policy')) {
+    return 'Interpret a supported CoinJoin policy before arming autopilot.'
+  }
+  if (message.includes('privacy goal')) {
+    return 'Describe a CoinJoin privacy goal before asking the policy agent to interpret it.'
+  }
 
   return message
 }
@@ -925,11 +1090,13 @@ function getPublishHint({
   sessionReady,
   selectedIntentType,
   publishLocked,
+  autopilotArmed,
 }: {
   connectionStatus: string
   sessionReady: boolean
   selectedIntentType: string
   publishLocked: boolean
+  autopilotArmed: boolean
 }): string {
   if (selectedIntentType !== 'coinjoin') {
     return 'Only CoinJoin is enabled for this demo today. The other intent types are roadmap previews.'
@@ -940,11 +1107,31 @@ function getPublishHint({
   if (!sessionReady) {
     return 'Refresh the session after connecting so the address and balance are ready for publishing.'
   }
+  if (autopilotArmed) {
+    return 'Autopilot is already managing this tab. Disarm it before switching back to a manual publish flow.'
+  }
   if (publishLocked) {
     return 'This tab already has an active intent in progress. Wait until the round finishes or fails before publishing again.'
   }
 
   return 'This session is ready to publish a CoinJoin intent.'
+}
+
+function statusBadgeVariant(
+  status: string,
+): 'neutral' | 'success' | 'warning' | 'danger' | 'accent' {
+  if (status === 'ready') return 'success'
+  if (status === 'interpreting') return 'accent'
+  if (status === 'error') return 'danger'
+  return 'neutral'
+}
+
+function formatClockTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(timestamp)
 }
 
 function formatTimestamp(entry: EventLogEntry): string {

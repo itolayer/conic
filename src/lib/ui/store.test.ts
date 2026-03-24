@@ -16,6 +16,8 @@ describe('conic UI store', () => {
     expect(active.network).toBe('devnet')
     expect(active.ckbRpcUrl).toBe('http://127.0.0.1:28114')
     expect(active.nostrRelayUrl).toBe('ws://127.0.0.1:8080')
+    expect(useConicStore.getState().policyPrompt).toBe('')
+    expect(useConicStore.getState().autopilotStatus.phase).toBe('idle')
   })
 
   it('keeps per-network endpoint profiles when switching networks', () => {

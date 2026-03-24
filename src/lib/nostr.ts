@@ -15,6 +15,7 @@ const GIFT_WRAP_KIND = 1_059
 const DELETE_KIND = 5
 const DEFAULT_QUERY_TIMEOUT_MS = 5_000
 const ROUND_COMMITMENT_CACHE_WINDOW_SECONDS = 60 * 60
+const INTENT_CACHE_WINDOW_SECONDS = 60 * 60
 
 export type PublishIntentParams = {
   amount: bigint
@@ -53,6 +54,8 @@ export class NostrService {
   #privateMessageSubscriptions = new Set<Subscription>()
   #roundCommitmentSubscription?: Subscription
   #roundCommitmentCache = new Map<string, RoundCommitment>()
+  #intentCache = new Map<string, Event>()
+  #deleteCache = new Map<string, string>()
 
   constructor(secretKey = generateSecretKey()) {
     this.#secretKey = secretKey
@@ -91,6 +94,8 @@ export class NostrService {
     this.#roundCommitmentSubscription?.close('client disconnect')
     this.#roundCommitmentSubscription = undefined
     this.#roundCommitmentCache.clear()
+    this.#intentCache.clear()
+    this.#deleteCache.clear()
     this.#relay?.close()
     this.#relay = undefined
   }
@@ -119,6 +124,7 @@ export class NostrService {
       }),
     })
 
+    this.#rememberIntentEvents([event])
     return event.id
   }
 
@@ -129,6 +135,7 @@ export class NostrService {
       content: '',
     })
 
+    this.#rememberDeleteEvents([event])
     return event.id
   }
 
@@ -139,18 +146,23 @@ export class NostrService {
         '#t': ['ckb-coinjoin'],
       },
     ])
-    const deleted = collectDeletedIds(
-      await this.#queryEvents([
-        {
-          kinds: [DELETE_KIND],
-        },
-      ]),
-    )
+    const deleteEvents = await this.#queryEvents([
+      {
+        kinds: [DELETE_KIND],
+      },
+    ])
 
-    const intents = events
+    this.#rememberIntentEvents(events)
+    this.#rememberDeleteEvents(deleteEvents)
+    this.#pruneIntentCache()
+
+    const intents = [...this.#intentCache.values()]
       .map((event) => this.#parseIntent(event))
       .filter((intent): intent is Intent => intent !== null)
-      .filter((intent) => !deleted.has(intent.id))
+      .filter((intent) => {
+        const deletedBy = this.#deleteCache.get(intent.id)
+        return deletedBy === undefined || deletedBy !== intent.pubkey
+      })
 
     const dedupedById = new Map<string, Intent>()
     for (const intent of intents) {
@@ -296,11 +308,39 @@ export class NostrService {
     )
   }
 
-  async #publishEvent(event: {
-    kind: number
-    tags: string[][]
-    content: string
-  }): Promise<{ id: string }> {
+  #rememberIntentEvents(events: Event[]): void {
+    for (const event of events) {
+      if (event.kind !== INTENT_KIND) {
+        continue
+      }
+
+      if (!event.tags.some((tag) => tag[0] === 't' && tag[1] === 'ckb-coinjoin')) {
+        continue
+      }
+
+      this.#intentCache.set(event.id, event)
+    }
+  }
+
+  #rememberDeleteEvents(events: Event[]): void {
+    const deleted = collectDeletedIds(events)
+    for (const [eventId, pubkey] of deleted) {
+      this.#deleteCache.set(eventId, pubkey)
+    }
+  }
+
+  #pruneIntentCache(): void {
+    const cutoff = Math.floor(Date.now() / 1000) - INTENT_CACHE_WINDOW_SECONDS
+
+    for (const [eventId, event] of this.#intentCache) {
+      if (event.created_at < cutoff) {
+        this.#intentCache.delete(eventId)
+        this.#deleteCache.delete(eventId)
+      }
+    }
+  }
+
+  async #publishEvent(event: { kind: number; tags: string[][]; content: string }): Promise<Event> {
     const relay = this.#requireRelay()
     const publishedEvent = finalizeEvent(
       {
@@ -412,14 +452,14 @@ export class NostrService {
   }
 }
 
-function collectDeletedIds(events: Event[]): Set<string> {
-  const deleted = new Set<string>()
+function collectDeletedIds(events: Event[]): Map<string, string> {
+  const deleted = new Map<string, string>()
 
   for (const event of events) {
     if (event.kind !== DELETE_KIND) continue
     for (const tag of event.tags) {
       if (tag[0] === 'e' && typeof tag[1] === 'string') {
-        deleted.add(tag[1])
+        deleted.set(tag[1], event.pubkey)
       }
     }
   }

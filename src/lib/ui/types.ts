@@ -1,5 +1,6 @@
 import type { CoordinationState } from '../coordination/types'
 import type { ConfirmedTransactionSummary } from '../ckb'
+import type { AutopilotStatus, PolicyInterpretation } from '../policy'
 
 export type UiNetwork = 'devnet' | 'testnet'
 
@@ -40,6 +41,8 @@ export type UiIntentRecord = {
 }
 
 export type EventLogLevel = 'info' | 'success' | 'warning' | 'error'
+
+export type PolicyStatus = 'idle' | 'interpreting' | 'ready' | 'error'
 
 export type EventLogEntry = {
   id: string
@@ -111,6 +114,19 @@ export type UiAdapterEvent =
   | {
       type: 'round'
       round: Partial<RoundStatus>
+      message: string
+      level?: EventLogLevel
+    }
+  | {
+      type: 'policy'
+      status: PolicyStatus
+      interpretation?: PolicyInterpretation
+      message: string
+      level?: EventLogLevel
+    }
+  | {
+      type: 'autopilot'
+      status: AutopilotStatus
       message: string
       level?: EventLogLevel
     }

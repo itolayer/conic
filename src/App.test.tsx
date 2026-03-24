@@ -17,11 +17,12 @@ describe('App', () => {
     render(<App />)
 
     expect(screen.getByRole('heading', { name: /^CONIC$/i })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: /Publish Intent/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /Privacy Agent/i })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: /Recent Intents/i })).toBeInTheDocument()
+    expect(screen.getByText(/Describe Privacy Goal/i)).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: /Round Monitor/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: /Connect Session/i })).not.toBeInTheDocument()
-    expect(screen.getAllByText(/Receiver Address/i)[0]).toBeInTheDocument()
+    expect(screen.getByText(/Autopilot idle/i)).toBeInTheDocument()
   })
 
   it('updates the network-specific endpoints when switching to testnet', () => {

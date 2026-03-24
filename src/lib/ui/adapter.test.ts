@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocked = vi.hoisted(() => {
   const mockListIntents = vi.fn()
   const mockPublishIntent = vi.fn(async () => 'intent-self')
+  const mockDeleteEvent = vi.fn(async () => 'deleted')
   const mockCoordinatorStartRound = vi.fn(async () => undefined)
   const mockCoordinatorOn = vi.fn(() => () => undefined)
+  const mockPolicyInterpret = vi.fn()
   const mockGetTip = vi.fn(async () => 1n)
   const mockFindCells = vi.fn(async function* () {
     yield {
@@ -23,9 +25,11 @@ const mocked = vi.hoisted(() => {
   return {
     mockListIntents,
     mockPublishIntent,
+    mockDeleteEvent,
     mockCreateCkbClient: vi.fn(async () => mockCkbClient),
     mockCoordinatorStartRound,
     mockCoordinatorOn,
+    mockPolicyInterpret,
     mockGetTip,
     mockFindCells,
     mockCkbClient,
@@ -80,7 +84,7 @@ vi.mock('../nostr', () => ({
     }
 
     async deleteEvent() {
-      return 'deleted'
+      return await mocked.mockDeleteEvent()
     }
 
     async publishRoundCommitment() {
@@ -116,11 +120,21 @@ vi.mock('../ckb', () => ({
         inputCapacity: 100n,
       }
     }
+
+    async getTransaction() {
+      return undefined
+    }
   },
 }))
 
 vi.mock('../privacy', () => ({
   PrivacyService: class {},
+}))
+
+vi.mock('../policy', () => ({
+  PolicyService: class {
+    interpret = mocked.mockPolicyInterpret
+  },
 }))
 
 vi.mock('../coordination/coordinator', () => ({
@@ -158,16 +172,44 @@ vi.mock('./ckb-client', () => ({
 import { UiWorkflowAdapter } from './adapter'
 
 describe('UiWorkflowAdapter', () => {
+  const adapters: UiWorkflowAdapter[] = []
+
+  function trackAdapter(adapter: UiWorkflowAdapter): UiWorkflowAdapter {
+    adapters.push(adapter)
+    return adapter
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.useRealTimers()
     mocked.coordinatorInstances.length = 0
     mocked.participantInstances.length = 0
     mocked.mockListIntents.mockResolvedValue([])
+    mocked.mockDeleteEvent.mockResolvedValue('deleted')
+    mocked.mockPolicyInterpret.mockResolvedValue({
+      rawPrompt: 'Mix 1000 CKB with 3 peers for privacy',
+      supported: true,
+      policy: {
+        intentType: 'coinjoin',
+        mixAmountShannons: '100000000000',
+        minParticipants: 3,
+      },
+      summary: 'CoinJoin 1000 CKB with 3 peers.',
+      explanation: 'Interpretation succeeded.',
+      warnings: [],
+    })
     mocked.privateMessageHandler = undefined
   })
 
+  afterEach(async () => {
+    while (adapters.length > 0) {
+      await adapters.pop()?.disconnect()
+    }
+    vi.useRealTimers()
+  })
+
   it('does not start two rounds when refreshRecentIntents overlaps', async () => {
-    const adapter = new UiWorkflowAdapter()
+    const adapter = trackAdapter(new UiWorkflowAdapter())
 
     await adapter.connect({
       network: 'devnet',
@@ -236,7 +278,7 @@ describe('UiWorkflowAdapter', () => {
   })
 
   it('prepares the participant even when local top-3 excludes the active intent', async () => {
-    const adapter = new UiWorkflowAdapter()
+    const adapter = trackAdapter(new UiWorkflowAdapter())
     const now = Math.floor(Date.now() / 1000)
 
     await adapter.connect({
@@ -313,7 +355,7 @@ describe('UiWorkflowAdapter', () => {
   })
 
   it('ignores stale compatible intents when selecting a round cohort', async () => {
-    const adapter = new UiWorkflowAdapter()
+    const adapter = trackAdapter(new UiWorkflowAdapter())
     const now = Math.floor(Date.now() / 1000)
 
     await adapter.connect({
@@ -393,7 +435,7 @@ describe('UiWorkflowAdapter', () => {
   })
 
   it('prepares the participant immediately from an incoming coordination message', async () => {
-    const adapter = new UiWorkflowAdapter()
+    const adapter = trackAdapter(new UiWorkflowAdapter())
     const now = Math.floor(Date.now() / 1000)
 
     await adapter.connect({
@@ -446,5 +488,132 @@ describe('UiWorkflowAdapter', () => {
         type: 'coordination_proposal',
       }),
     )
+  })
+
+  it('arms autopilot and publishes exactly one matching intent', async () => {
+    const adapter = trackAdapter(new UiWorkflowAdapter())
+
+    await adapter.connect({
+      network: 'devnet',
+      ckbRpcUrl: 'http://127.0.0.1:28114',
+      nostrRelayUrl: 'ws://127.0.0.1:8080',
+      mixAmountShannons: '100000000000',
+      minParticipants: 3,
+    })
+
+    await adapter.prepareSession({
+      privateKey: '0xabc',
+      receiverAddress: '',
+    })
+
+    await adapter.armAutopilot({
+      policy: {
+        intentType: 'coinjoin',
+        mixAmountShannons: '100000000000',
+        minParticipants: 3,
+      },
+      receiverAddress: 'ckt1qreceiver',
+    })
+
+    await adapter.refreshRecentIntents()
+    await adapter.refreshRecentIntents()
+
+    expect(mocked.mockPublishIntent).toHaveBeenCalledTimes(1)
+  })
+
+  it('schedules one autopilot retry after a failed round', async () => {
+    const adapter = trackAdapter(new UiWorkflowAdapter())
+    const statuses: Array<{ phase: string; armed: boolean }> = []
+
+    adapter.subscribe((event) => {
+      if (event.type === 'autopilot') {
+        statuses.push({ phase: event.status.phase, armed: event.status.armed })
+      }
+    })
+
+    await adapter.connect({
+      network: 'devnet',
+      ckbRpcUrl: 'http://127.0.0.1:28114',
+      nostrRelayUrl: 'ws://127.0.0.1:8080',
+      mixAmountShannons: '100000000000',
+      minParticipants: 3,
+    })
+
+    await adapter.prepareSession({
+      privateKey: '0xabc',
+      receiverAddress: '',
+    })
+
+    await adapter.armAutopilot({
+      policy: {
+        intentType: 'coinjoin',
+        mixAmountShannons: '100000000000',
+        minParticipants: 3,
+      },
+      receiverAddress: 'ckt1qreceiver',
+    })
+
+    mocked.privateMessageHandler?.(
+      {
+        type: 'round_failed',
+        coordination_id: 'coord-id',
+        reason: 'output_collection_timeout',
+      },
+      'peer-coordinator',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(statuses).toContainEqual({ phase: 'retry_scheduled', armed: true })
+
+    await new Promise((resolve) => setTimeout(resolve, 5_200))
+
+    expect(mocked.mockPublishIntent).toHaveBeenCalledTimes(2)
+  })
+
+  it('auto-disarms autopilot after a successful round', async () => {
+    const adapter = trackAdapter(new UiWorkflowAdapter())
+    const statuses: Array<{ phase: string; armed: boolean }> = []
+
+    adapter.subscribe((event) => {
+      if (event.type === 'autopilot') {
+        statuses.push({ phase: event.status.phase, armed: event.status.armed })
+      }
+    })
+
+    await adapter.connect({
+      network: 'devnet',
+      ckbRpcUrl: 'http://127.0.0.1:28114',
+      nostrRelayUrl: 'ws://127.0.0.1:8080',
+      mixAmountShannons: '100000000000',
+      minParticipants: 3,
+    })
+
+    await adapter.prepareSession({
+      privateKey: '0xabc',
+      receiverAddress: '',
+    })
+
+    await adapter.armAutopilot({
+      policy: {
+        intentType: 'coinjoin',
+        mixAmountShannons: '100000000000',
+        minParticipants: 3,
+      },
+      receiverAddress: 'ckt1qreceiver',
+    })
+
+    mocked.privateMessageHandler?.(
+      {
+        type: 'round_complete',
+        coordination_id: 'coord-id',
+        tx_hash: `0x${'a'.repeat(64)}`,
+      },
+      'peer-coordinator',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(statuses.at(-1)).toEqual({ phase: 'completed', armed: false })
   })
 })

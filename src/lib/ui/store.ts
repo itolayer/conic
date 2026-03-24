@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+import type { AutopilotStatus, PolicyInterpretation } from '../policy'
 import { UiWorkflowAdapter } from './adapter'
 import { createDefaultUiConfig } from './defaults'
 import type {
@@ -9,6 +10,7 @@ import type {
   ConnectionSnapshot,
   IntentType,
   EventLogEntry,
+  PolicyStatus,
   PersistedUiConfig,
   RoundStatus,
   UiIntentRecord,
@@ -22,6 +24,10 @@ type ConicStore = PersistedUiConfig & {
   connection: ConnectionSnapshot
   ckbPrivateKey: string
   receiverAddress: string
+  policyPrompt: string
+  policyStatus: PolicyStatus
+  policyInterpretation?: PolicyInterpretation
+  autopilotStatus: AutopilotStatus
   ckbAddress?: string
   balance?: BalanceSnapshot
   intents: UiIntentRecord[]
@@ -40,12 +46,16 @@ type ConicStore = PersistedUiConfig & {
   updateMinParticipants: (value: number) => void
   updatePrivateKey: (value: string) => void
   updateReceiverAddress: (value: string) => void
+  updatePolicyPrompt: (value: string) => void
   setSessionConfigExpanded: (value: boolean) => void
   setConsoleOpen: (value: boolean) => void
   setSelectedIntentType: (value: IntentType) => void
   connect: () => Promise<void>
   disconnect: () => Promise<void>
   prepareSession: () => Promise<void>
+  interpretPolicy: () => Promise<void>
+  armAutopilot: () => Promise<void>
+  disarmAutopilot: () => Promise<void>
   publishIntent: () => Promise<void>
   refreshIntents: () => Promise<void>
   deleteActiveIntent: () => Promise<void>
@@ -59,6 +69,14 @@ function buildInitialRound(): RoundStatus {
     role: 'idle',
     participantPhase: 'IDLE',
     coordinatorPhase: 'IDLE',
+  }
+}
+
+function buildInitialAutopilot(): AutopilotStatus {
+  return {
+    armed: false,
+    phase: 'idle',
+    lastAction: 'Autopilot is idle.',
   }
 }
 
@@ -108,6 +126,10 @@ export const useConicStore = create<ConicStore>()(
       connection: { status: 'idle' },
       ckbPrivateKey: '',
       receiverAddress: '',
+      policyPrompt: '',
+      policyStatus: 'idle',
+      policyInterpretation: undefined,
+      autopilotStatus: buildInitialAutopilot(),
       ckbAddress: undefined,
       balance: undefined,
       intents: [],
@@ -150,6 +172,7 @@ export const useConicStore = create<ConicStore>()(
       updateMinParticipants: (value) => set({ minParticipants: value }),
       updatePrivateKey: (value) => set({ ckbPrivateKey: value }),
       updateReceiverAddress: (value) => set({ receiverAddress: value }),
+      updatePolicyPrompt: (value) => set({ policyPrompt: value }),
       setSessionConfigExpanded: (value) => set({ isSessionConfigExpanded: value }),
       setConsoleOpen: (value) => set({ isConsoleOpen: value }),
       setSelectedIntentType: (value) => set({ selectedIntentType: value }),
@@ -170,6 +193,24 @@ export const useConicStore = create<ConicStore>()(
         } finally {
           set({ isPreparingSession: false })
         }
+      },
+      interpretPolicy: async () => {
+        await adapter.interpretPolicy(get().policyPrompt)
+      },
+      armAutopilot: async () => {
+        const state = get()
+        const policy = state.policyInterpretation?.policy
+        if (!policy) {
+          throw new Error('Interpret a supported privacy policy before arming autopilot.')
+        }
+
+        await adapter.armAutopilot({
+          policy,
+          receiverAddress: state.receiverAddress,
+        })
+      },
+      disarmAutopilot: async () => {
+        await adapter.disarmAutopilot()
       },
       publishIntent: async () => {
         set({ isPublishingIntent: true })
@@ -214,6 +255,7 @@ export const useConicStore = create<ConicStore>()(
         mixAmountShannons: state.mixAmountShannons,
         minParticipants: state.minParticipants,
         endpoints: state.endpoints,
+        policyPrompt: state.policyPrompt,
       }),
     },
   ),
@@ -253,6 +295,37 @@ adapter.subscribe((event) => {
         eventLog: prependLog(
           state.eventLog,
           createLogEntry('Intent Sync', event.message, 'success'),
+        ),
+      })
+      return
+    case 'policy':
+      useConicStore.setState({
+        policyStatus: event.status,
+        policyInterpretation: event.interpretation ?? state.policyInterpretation,
+        mixAmountShannons:
+          event.interpretation?.supported && event.interpretation.policy
+            ? event.interpretation.policy.mixAmountShannons
+            : state.mixAmountShannons,
+        minParticipants:
+          event.interpretation?.supported && event.interpretation.policy
+            ? event.interpretation.policy.minParticipants
+            : state.minParticipants,
+        selectedIntentType:
+          event.interpretation?.supported && event.interpretation.policy
+            ? 'coinjoin'
+            : state.selectedIntentType,
+        eventLog: prependLog(
+          state.eventLog,
+          createLogEntry('Policy Agent', event.message, event.level ?? 'info'),
+        ),
+      })
+      return
+    case 'autopilot':
+      useConicStore.setState({
+        autopilotStatus: event.status,
+        eventLog: prependLog(
+          state.eventLog,
+          createLogEntry('Autopilot', event.message, event.level ?? 'info'),
         ),
       })
       return
@@ -301,6 +374,10 @@ export function resetConicUiStore(): void {
     connection: { status: 'idle' },
     ckbPrivateKey: '',
     receiverAddress: '',
+    policyPrompt: '',
+    policyStatus: 'idle',
+    policyInterpretation: undefined,
+    autopilotStatus: buildInitialAutopilot(),
     ckbAddress: undefined,
     balance: undefined,
     intents: [],

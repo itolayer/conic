@@ -6,6 +6,12 @@ import { CoordinationParticipant } from '../coordination/participant'
 import { CoordinationState, type CoordinationMessage, type Intent } from '../coordination/types'
 import { compareProposals, deriveCoordinationId } from '../coordination/utils'
 import { NostrService, type Intent as NostrIntent } from '../nostr'
+import {
+  type AutopilotStatus,
+  type PolicyInterpretation,
+  PolicyService,
+  type PrivacyPolicy,
+} from '../policy'
 import { PrivacyService } from '../privacy'
 import { createCkbClient, type UiCkbClient } from './ckb-client'
 import type {
@@ -23,6 +29,7 @@ const RECENT_WINDOW_SECONDS = 10 * 60
 const MATCH_COHORT_WINDOW_SECONDS = 60
 const BALANCE_CELL_LIMIT = 100
 const INTENT_POLL_INTERVAL_MS = 3_000
+const AUTOPILOT_RETRY_MS = 5_000
 const DEFAULT_CELL_FILTER = {
   scriptLenRange: [0, 1] as [number, number],
   outputDataLenRange: [0, 1] as [number, number],
@@ -38,6 +45,7 @@ export class UiWorkflowAdapter {
   #ckb?: UiCkbClient
   #ckbService?: CkbService
   #privacy = new PrivacyService()
+  #policy = new PolicyService()
   #listeners = new Set<(event: UiAdapterEvent) => void>()
   #lastConfig?: ActiveUiConfig
   #privateMessageUnsubscribe?: () => void
@@ -54,6 +62,10 @@ export class UiWorkflowAdapter {
   #coordinationId?: string
   #startingCoordination = false
   #roundSetupInFlight = false
+  #autopilotPolicy?: PrivacyPolicy
+  #autopilotStatus: AutopilotStatus = buildIdleAutopilotStatus()
+  #autopilotRetryHandle?: ReturnType<typeof setTimeout>
+  #autopilotSyncInFlight = false
   #participantSetupPromise?: Promise<void>
   #pendingParticipantMessages: Array<{
     senderPubkey: string
@@ -127,6 +139,7 @@ export class UiWorkflowAdapter {
   }
 
   async disconnect(): Promise<void> {
+    this.#clearAutopilotRetry()
     this.#privateMessageUnsubscribe?.()
     this.#privateMessageUnsubscribe = undefined
 
@@ -147,6 +160,13 @@ export class UiWorkflowAdapter {
     this.#coordinatorPhase = 'IDLE'
     this.#coordinationId = undefined
     this.#pendingParticipantMessages = []
+    this.#autopilotPolicy = undefined
+    if (this.#autopilotStatus.armed || this.#autopilotStatus.phase !== 'idle') {
+      this.#emitAutopilot(
+        buildIdleAutopilotStatus(),
+        'Autopilot reset because the session disconnected.',
+      )
+    }
 
     this.#emit({
       type: 'connection',
@@ -180,6 +200,7 @@ export class UiWorkflowAdapter {
       balance,
       message: 'Prepared session key and refreshed balance',
     })
+    await this.#syncAutopilot('session_ready')
 
     return {
       ckbAddress: address,
@@ -187,7 +208,96 @@ export class UiWorkflowAdapter {
     }
   }
 
+  async interpretPolicy(rawPrompt: string): Promise<PolicyInterpretation> {
+    this.#emit({
+      type: 'policy',
+      status: 'interpreting',
+      message: 'Interpreting privacy goal with the policy agent',
+    })
+
+    try {
+      const interpretation = await this.#policy.interpret(rawPrompt)
+      this.#emit({
+        type: 'policy',
+        status: 'ready',
+        interpretation,
+        message: interpretation.supported
+          ? 'Policy agent produced a deterministic CoinJoin policy'
+          : 'Policy agent flagged the request as unsupported for this demo',
+        level: interpretation.supported ? 'success' : 'warning',
+      })
+      return interpretation
+    } catch (error) {
+      const message = normalizeError(error)
+      this.#emit({
+        type: 'policy',
+        status: 'error',
+        message,
+        level: 'error',
+      })
+      throw error
+    }
+  }
+
+  async armAutopilot({
+    policy,
+    receiverAddress,
+  }: {
+    policy: PrivacyPolicy
+    receiverAddress: string
+  }): Promise<void> {
+    if (!receiverAddress.trim()) {
+      throw new Error('Receiver address is required')
+    }
+
+    if (this.#ckb) {
+      await ccc.Address.fromString(receiverAddress.trim(), this.#ckb)
+    }
+
+    this.#autopilotPolicy = policy
+    this.#receiverAddress = receiverAddress.trim()
+    this.#clearAutopilotRetry()
+    this.#emitAutopilot(
+      {
+        armed: true,
+        phase: 'armed_waiting_session',
+        lastAction: 'Autopilot armed. Waiting for session readiness before publishing.',
+      },
+      'Autopilot armed',
+      'success',
+    )
+    await this.#syncAutopilot('armed')
+  }
+
+  async disarmAutopilot(reason = 'Autopilot disarmed by user.'): Promise<void> {
+    this.#clearAutopilotRetry()
+    this.#autopilotPolicy = undefined
+
+    if (this.#activeIntent && this.#nostr) {
+      await this.#nostr.deleteEvent(this.#activeIntent.id).catch(() => undefined)
+      this.#activeIntent = undefined
+    }
+
+    this.#emitAutopilot(
+      {
+        armed: false,
+        phase: 'idle',
+        lastAction: reason,
+      },
+      reason,
+      'info',
+    )
+
+    if (this.#nostr) {
+      await this.refreshRecentIntents().catch(() => undefined)
+    }
+  }
+
   async publishIntent(draft: PublishIntentDraft): Promise<void> {
+    await this.#publishIntent(draft, 'manual')
+  }
+
+  async #publishIntent(draft: PublishIntentDraft, source: 'manual' | 'autopilot'): Promise<void> {
     const nostr = this.#requireNostr()
     const ckb = this.#requireCkb()
     if (!this.#privateKey) {
@@ -225,6 +335,21 @@ export class UiWorkflowAdapter {
     this.#participantPhase = CoordinationState.MATCHING
     this.#coordinatorPhase = 'IDLE'
     this.#pendingParticipantMessages = []
+    this.#coordinationId = undefined
+
+    if (source === 'autopilot') {
+      this.#emitAutopilot(
+        {
+          ...this.#autopilotStatus,
+          armed: true,
+          phase: 'waiting_for_peers',
+          lastAction: `Published ${formatIntentSummary(this.#activeIntent)} and started watching for peers.`,
+          retryAt: undefined,
+        },
+        'Autopilot published a CoinJoin intent and is watching for peers',
+        'success',
+      )
+    }
 
     await this.refreshRecentIntents()
   }
@@ -254,6 +379,8 @@ export class UiWorkflowAdapter {
         detail: `Round candidate evaluation failed: ${normalizeError(error)}`,
       })
     }
+
+    await this.#syncAutopilot('refresh')
     return mapped
   }
 
@@ -392,6 +519,18 @@ export class UiWorkflowAdapter {
     })
 
     if (uniqueCompatible.length < targetSize) {
+      if (this.#autopilotStatus.armed) {
+        this.#emitAutopilot(
+          {
+            ...this.#autopilotStatus,
+            armed: true,
+            phase: 'waiting_for_peers',
+            lastAction: `Watching relay for ${targetSize - uniqueCompatible.length} more compatible peers.`,
+            retryAt: undefined,
+          },
+          `Autopilot is waiting for ${targetSize - uniqueCompatible.length} more compatible peers`,
+        )
+      }
       this.#emitRound(
         `Waiting for ${targetSize - uniqueCompatible.length} more compatible intents`,
         {
@@ -485,6 +624,18 @@ export class UiWorkflowAdapter {
         })
         this.#coordinator.on('phase_change', (phase) => {
           this.#coordinatorPhase = phase
+          if (this.#autopilotStatus.armed && phase !== CoordinationState.COMPLETE) {
+            this.#emitAutopilot(
+              {
+                ...this.#autopilotStatus,
+                armed: true,
+                phase: 'round_active',
+                lastAction: `Coordinator phase is now ${phase}.`,
+                retryAt: undefined,
+              },
+              `Autopilot coordinator phase -> ${phase}`,
+            )
+          }
           this.#emitRound(`Coordinator phase -> ${phase}`, {
             role: 'coordinator',
             coordinatorPhase: phase,
@@ -615,6 +766,19 @@ export class UiWorkflowAdapter {
     this.#coordinatorPhase = 'IDLE'
     this.#coordinationId = undefined
     this.#pendingParticipantMessages = []
+    if (this.#autopilotStatus.armed) {
+      this.#clearAutopilotRetry()
+      this.#autopilotPolicy = undefined
+      this.#emitAutopilot(
+        {
+          armed: false,
+          phase: 'completed',
+          lastAction: `Autopilot completed one CoinJoin round: ${txHash}`,
+        },
+        'Autopilot completed one CoinJoin round and auto-disarmed',
+        'success',
+      )
+    }
     await this.refreshRecentIntents().catch(() => undefined)
   }
 
@@ -656,6 +820,9 @@ export class UiWorkflowAdapter {
     this.#coordinatorPhase = 'IDLE'
     this.#coordinationId = undefined
     this.#pendingParticipantMessages = []
+    if (this.#autopilotStatus.armed) {
+      this.#scheduleAutopilotRetry(reason)
+    }
     await this.refreshRecentIntents().catch(() => undefined)
   }
 
@@ -763,6 +930,23 @@ export class UiWorkflowAdapter {
     await this.#participant.handleMessage(message)
     if (this.#participant.state !== previousParticipantPhase) {
       this.#participantPhase = this.#participant.state
+      if (
+        this.#autopilotStatus.armed &&
+        this.#participant.state !== CoordinationState.MATCHING &&
+        this.#participant.state !== CoordinationState.FAILED &&
+        this.#participant.state !== CoordinationState.COMPLETE
+      ) {
+        this.#emitAutopilot(
+          {
+            ...this.#autopilotStatus,
+            armed: true,
+            phase: 'round_active',
+            lastAction: `Participant phase is now ${this.#participant.state}.`,
+            retryAt: undefined,
+          },
+          `Autopilot participant phase -> ${this.#participant.state}`,
+        )
+      }
       this.#emitRound(`Participant phase -> ${this.#participant.state}`)
       if (this.#participant.state === CoordinationState.FAILED) {
         this.#emit({
@@ -793,6 +977,148 @@ export class UiWorkflowAdapter {
       await this.#dispatchToParticipant(entry.message)
     }
   }
+
+  async #syncAutopilot(trigger: string): Promise<void> {
+    if (!this.#autopilotStatus.armed || this.#autopilotSyncInFlight) {
+      return
+    }
+
+    this.#autopilotSyncInFlight = true
+    try {
+      if (!this.#autopilotPolicy) {
+        return
+      }
+
+      if (this.#autopilotRetryHandle) {
+        return
+      }
+
+      if (!this.#nostr || !this.#ckb || !this.#privateKey || !this.#ckbAddress) {
+        this.#emitAutopilot(
+          {
+            ...this.#autopilotStatus,
+            armed: true,
+            phase: 'armed_waiting_session',
+            lastAction: 'Autopilot is waiting for the relay, RPC, and wallet session to be ready.',
+            retryAt: undefined,
+          },
+          'Autopilot is waiting for a ready session',
+        )
+        return
+      }
+
+      if (!this.#receiverAddress) {
+        this.#emitAutopilot(
+          {
+            ...this.#autopilotStatus,
+            armed: true,
+            phase: 'awaiting_receiver',
+            lastAction: 'Enter a receiver address before autopilot can publish.',
+            retryAt: undefined,
+          },
+          'Autopilot is waiting for a receiver address',
+          'warning',
+        )
+        return
+      }
+
+      if (this.#participant || this.#coordinator || this.#coordinationId) {
+        this.#emitAutopilot(
+          {
+            ...this.#autopilotStatus,
+            armed: true,
+            phase: 'round_active',
+            lastAction: `Autopilot is tracking an active round (${trigger}).`,
+            retryAt: undefined,
+          },
+          'Autopilot is tracking an active round',
+        )
+        return
+      }
+
+      if (!intentMatchesPolicy(this.#activeIntent, this.#autopilotPolicy)) {
+        this.#emitAutopilot(
+          {
+            ...this.#autopilotStatus,
+            armed: true,
+            phase: 'publishing',
+            lastAction: 'Publishing a CoinJoin intent from the parsed policy.',
+            retryAt: undefined,
+          },
+          'Autopilot is publishing a CoinJoin intent',
+        )
+        await this.#publishIntent(
+          {
+            amount: BigInt(this.#autopilotPolicy.mixAmountShannons),
+            minParticipants: this.#autopilotPolicy.minParticipants,
+            minReputation: 0,
+            receiverAddress: this.#receiverAddress,
+          },
+          'autopilot',
+        )
+        return
+      }
+
+      this.#emitAutopilot(
+        {
+          ...this.#autopilotStatus,
+          armed: true,
+          phase: 'waiting_for_peers',
+          lastAction: `Autopilot is watching for a ${this.#autopilotPolicy.minParticipants}-peer CoinJoin cohort.`,
+          retryAt: undefined,
+        },
+        'Autopilot is watching the relay for compatible peers',
+      )
+    } finally {
+      this.#autopilotSyncInFlight = false
+    }
+  }
+
+  #scheduleAutopilotRetry(reason: string): void {
+    if (!this.#autopilotStatus.armed || !this.#autopilotPolicy) {
+      return
+    }
+
+    this.#clearAutopilotRetry()
+    const retryAt = Date.now() + AUTOPILOT_RETRY_MS
+    this.#emitAutopilot(
+      {
+        ...this.#autopilotStatus,
+        armed: true,
+        phase: 'retry_scheduled',
+        lastAction: `Round failed (${reason}). Autopilot will retry shortly.`,
+        retryAt,
+      },
+      'Autopilot scheduled a retry after the failed round',
+      'warning',
+    )
+
+    this.#autopilotRetryHandle = setTimeout(() => {
+      this.#autopilotRetryHandle = undefined
+      void this.#syncAutopilot('retry')
+    }, AUTOPILOT_RETRY_MS)
+  }
+
+  #clearAutopilotRetry(): void {
+    if (this.#autopilotRetryHandle) {
+      clearTimeout(this.#autopilotRetryHandle)
+      this.#autopilotRetryHandle = undefined
+    }
+  }
+
+  #emitAutopilot(
+    status: AutopilotStatus,
+    message: string,
+    level: 'info' | 'success' | 'warning' | 'error' = 'info',
+  ): void {
+    this.#autopilotStatus = status
+    this.#emit({
+      type: 'autopilot',
+      status,
+      message,
+      level,
+    })
+  }
 }
 
 function compareRecentIntents(a: NostrIntent, b: NostrIntent): number {
@@ -800,6 +1126,14 @@ function compareRecentIntents(a: NostrIntent, b: NostrIntent): number {
     { id: a.id, created_at: a.createdAt },
     { id: b.id, created_at: b.createdAt },
   )
+}
+
+function buildIdleAutopilotStatus(): AutopilotStatus {
+  return {
+    armed: false,
+    phase: 'idle',
+    lastAction: 'Autopilot is idle.',
+  }
 }
 
 function shouldQueueForParticipant(message: CoordinationMessage): boolean {
@@ -920,4 +1254,20 @@ function highlightSummary(
     totalOutputCapacity: formatShannons(summary.totalOutputCapacity),
     fee: formatShannons(summary.fee),
   }
+}
+
+function intentMatchesPolicy(intent: Intent | undefined, policy: PrivacyPolicy): boolean {
+  return (
+    intent?.amount.toString() === policy.mixAmountShannons &&
+    intent.minParticipants === policy.minParticipants &&
+    intent.minReputation === 0
+  )
+}
+
+function formatIntentSummary(intent: Intent | undefined): string {
+  if (!intent) {
+    return 'CoinJoin intent'
+  }
+
+  return `${formatShannons(intent.amount)} CoinJoin intent for ${intent.minParticipants} participants`
 }
