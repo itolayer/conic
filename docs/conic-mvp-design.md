@@ -4,12 +4,23 @@
 
 CONIC is an intent layer for CKB built on top of Nostr. The first feature is a decentralized, P2P CoinJoin-style mixing workflow. The goal is to deliver a functional MVP demonstrating a complete workflow for matching and coordinating privacy-preserving CKB transactions on testnet.
 
+The MVP now includes an **AI-powered policy layer** above the existing intent form. Instead of filling every field manually, a user can describe a privacy goal in natural language, such as "mix 1000 CKB with 3 peers for privacy", and CONIC translates that into a structured CoinJoin policy.
+
+This AI layer is intentionally constrained:
+
+- It is used only for **intent translation, summary, and user-facing explanation**.
+- It does **not** sign transactions, choose witnesses, assemble CKB transactions, or alter the Nostr coordination protocol.
+- The resulting policy is normalized deterministically before any on-chain or relay-facing action is taken.
+- Execution remains a standard CoinJoin flow over Nostr and CKB Testnet.
+
 ## 2. Architecture: The Intent Marketplace
 
 The CONIC marketplace is a decentralized "ask/bid" system for CKB intents.
 
 ### 2.1 Roles
 
+- **User**: Expresses a privacy goal in natural language and approves arming the autopilot for execution.
+- **Policy Agent**: A constrained AI-assisted local component that translates natural-language goals into a structured CoinJoin policy and explains what will happen. It never handles signing or key management.
 - **Participant (Intent Poster)**: Posts a public intent to the Nostr relay, expressing desire to participate in a CoinJoin mix of a specific amount.
 - **Coordinator**: The participant who "completes" a matching set (e.g., the Nth participant for an N-person mix). They take on the coordination role for that round.
 
@@ -23,6 +34,51 @@ The CONIC marketplace is a decentralized "ask/bid" system for CKB intents.
   3. If timestamps are equal, the proposal with the **lexicographically smaller event ID** wins.
   4. Participants who receive a competing proposal with a winning priority **within 5 seconds** of the first proposal MUST switch to the winning Coordinator.
   5. After the 5-second window, participants commit to whichever Coordinator's heartbeat they first respond to.
+
+### 2.3 AI Policy Layer
+
+The AI layer sits **above** the existing marketplace and protocol. It does not introduce a new wire format and does not change how rounds are coordinated.
+
+**Input**:
+
+- A natural-language privacy goal from the user
+- Existing local app context such as selected intent type and session readiness
+
+**Output**:
+
+- A deterministic `PrivacyPolicy` object:
+
+  ```ts
+  {
+    intentType: 'coinjoin'
+    mixAmountShannons: string
+    minParticipants: number
+  }
+  ```
+
+- A human-readable summary
+- A human-readable explanation
+- Optional warnings when the prompt requests unsupported behavior
+
+**Guardrails**:
+
+- Only `intentType = 'coinjoin'` is accepted in the MVP.
+- Receiver address, private keys, relay URL, RPC URL, and signing behavior remain manual/deterministic inputs.
+- Unsupported asks such as Fiber/Perun routing, atomic swaps, or reputation gating are rejected by the normalizer before execution.
+
+### 2.4 Armed Autopilot
+
+Once the user reviews the parsed policy and enters a receiver address, they can explicitly **arm** CONIC's autopilot.
+
+The autopilot is a deterministic orchestration layer that:
+
+- Publishes the normalized CoinJoin intent automatically
+- Polls the relay for compatible intents
+- Reuses the existing coordinator/participant state machine
+- Retries after a failed round with a fixed short backoff
+- Auto-disarms after the first successful round to avoid repeated execution
+
+This keeps the UX agentic while preserving deterministic transaction behavior.
 
 ## 3. Nostr Protocol Definition
 
@@ -39,6 +95,9 @@ We use custom Nostr events to coordinate the marketplace and the mix.
 ### 3.2 Intent Post (Kind 30078)
 
 Uses NIP-78 (Application-specific data) to avoid kind collisions.
+
+> [!NOTE]
+> The AI layer does **not** change the on-relay intent format. Natural-language prompts are translated locally into the same structured CoinJoin intent payload described below.
 
 - **Content** (JSON):
 
@@ -299,27 +358,40 @@ Target **CKB Testnet (Pudge)** for the MVP. Mainnet support is out of scope.
 > [!NOTE]
 > localStorage encryption is adequate for an MVP but does not protect against XSS attacks. A production version should use a browser extension or hardware wallet for key management.
 
+### 7.4 AI Policy Configuration
+
+For the MVP, the natural-language policy layer uses a **single configurable OpenAI-compatible endpoint**.
+
+- `VITE_POLICY_LLM_URL`
+- `VITE_POLICY_LLM_MODEL`
+- `VITE_POLICY_LLM_API_KEY`
+
+If these variables are not configured, CONIC still supports the manual intent flow; only the AI policy interpretation step is unavailable.
+
 ## 8. Implementation Roadmap (MVP)
 
 | #   | Module                  | Description                                                                      | Dependencies              |
 | --- | ----------------------- | -------------------------------------------------------------------------------- | ------------------------- |
 | 1   | **Nostr Connector**     | Connect to relay, subscribe to events, publish events. NIP-44/NIP-59 encryption. | `nostr-tools`             |
-| 2   | **Intent Marketplace**  | List active intents, post new intents, filter by amount/participants.            | Module 1                  |
-| 3   | **Privacy Module**      | RSA blind signature (RFC 9474): prepare, blind, blindSign, finalize, verify.     | `@cloudflare/blindrsa-ts` |
-| 4   | **Coordination Engine** | State machine (§6). Message routing. Timeout management.                         | Modules 1, 3              |
-| 5   | **CKB Engine**          | Transaction assembly, witness signing, broadcast to testnet.                     | ccc                       |
-| 6   | **UI**                  | React components for intent listing, round status, and transaction result.       | Modules 2, 4, 5           |
+| 2   | **Policy AI Layer**     | Translate natural-language privacy goals into deterministic CoinJoin policies.   | Module 6, LLM endpoint    |
+| 3   | **Intent Marketplace**  | List active intents, post new intents, filter by amount/participants.            | Module 1                  |
+| 4   | **Privacy Module**      | RSA blind signature (RFC 9474): prepare, blind, blindSign, finalize, verify.     | `@cloudflare/blindrsa-ts` |
+| 5   | **Coordination Engine** | State machine (§6). Message routing. Timeout management.                         | Modules 1, 4              |
+| 6   | **CKB Engine**          | Transaction assembly, witness signing, broadcast to testnet.                     | ccc                       |
+| 7   | **UI + Autopilot**      | Prompt-first UX, parsed policy review, armed autopilot, round status, tx result. | Modules 2, 3, 5, 6        |
 
 ## 9. Success Criteria
 
 Each criterion must be **demonstrable on CKB Testnet**:
 
+- [ ] **SC-0**: Enter a natural-language privacy goal and have the app derive a deterministic CoinJoin policy (`mixAmountShannons`, `minParticipants`) plus explanation.
 - [ ] **SC-1**: Connect to a Nostr relay and list existing CoinJoin intents (Kind 30078 with tag `ckb-coinjoin`).
 - [ ] **SC-2**: Publish a new CoinJoin intent and observe it appearing on the relay.
 - [ ] **SC-3**: With 3 participants (can be simulated in separate browser tabs), the 3rd participant triggers a Coordination Proposal and becomes Coordinator.
 - [ ] **SC-4**: Complete the full coordination flow (Heartbeat → Inputs → Blinding → Outputs → Signing) to produce a valid signed CKB testnet transaction.
 - [ ] **SC-5**: The resulting transaction has 3 outputs of equal value, and the Coordinator cannot determine which output belongs to which input (verified by log inspection — the Coordinator's logs must not contain input-to-output mappings).
 - [ ] **SC-6**: Simulate a participant dropout (close tab during Input Collection) and verify the round either retries with remaining participants (if ≥ `min_participants`) or fails gracefully with a `round_failed` message.
+- [ ] **SC-7**: After the user arms autopilot, CONIC automatically publishes the parsed intent, monitors the relay, and either completes one round or retries deterministically after failure.
 
 ## 10. Future Work
 
